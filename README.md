@@ -219,9 +219,3 @@ followed by normalized book content ready for downstream use with `epub2tts-koko
 ## License
 
 MIT © 2026 [xDarkicex](https://github.com/xDarkicex)
-
----
-
-## Repository
-
-[https://github.com/xDarkicex/Taliesin_Engine](https://github.com/xDarkicex/Taliesin_Engine)
