@@ -1,3 +1,5 @@
+#!/usr/bin/env perl
+
 # ==============================================================================
 # Taliesin_Engine.pl - High-Assurance Prosody & OCR Restoration Pipeline
 # ==============================================================================
@@ -6,7 +8,6 @@
 # Purpose: Deterministic text normalization for neural TTS synthesis.
 # ==============================================================================
 
-#!/usr/bin/perl
 use strict;
 use warnings;
 use utf8;
