@@ -12,8 +12,11 @@ use strict;
 use warnings;
 use utf8;
 use Getopt::Long;
-binmode(STDOUT, ":utf8");
-binmode(STDIN,  ":utf8");
+use Encode qw(decode);
+
+# Ensure all output is UTF-8
+binmode(STDOUT, ":encoding(UTF-8)");
+binmode(STDERR, ":encoding(UTF-8)");
 
 my $TITLE  = "Unknown Title";
 my $AUTHOR = "Unknown Author";
@@ -42,10 +45,10 @@ Options:
 NOTE on metadata: epub2tts-kokoro only reads Title and Author from .txt files.
 Fields like genre, publisher, and year must be embedded post-process via ffmpeg:
   ffmpeg -i book.m4b -metadata genre="Mythology" -metadata date="1849" \\
-         -metadata comment="Publisher: Everyman" -c copy book_tagged.m4b
+         -metadata comment="Publisher: xDarkicex" -c copy book_tagged.m4b
 
 Summary of Operations:
-  Phase 1  Normalizes raw bytes: CRLF, soft hyphens, ligatures, exotic Unicode.
+  Phase 1  Normalizes raw bytes: BOM, CRLF, soft hyphens, ligatures, exotic Unicode.
   Phase 2  Strips Project Gutenberg boilerplate, asterisms, and horizontal rules.
   Phase 3  Repairs hyphenated line-breaks and joins soft-wrapped prose lines.
   Phase 4  Normalizes OCR-damaged punctuation, em-dashes, ellipses, and spacing.
@@ -58,12 +61,26 @@ EOF
     exit;
 }
 
+# ============================================================
+# INPUT: read raw bytes then decode as UTF-8
+# Using raw read + explicit decode avoids mojibake when <> reads
+# from a filename argument rather than STDIN (where binmode applies).
+# ============================================================
 undef $/;
-my $text = <>;
+my $raw = <>;
+my $text = eval { decode('UTF-8', $raw, Encode::FB_CROAK) };
+if ($@) {
+    # Fall back to Latin-1 if the file isn't valid UTF-8 (some old Gutenberg files)
+    require Encode;
+    $text = decode('iso-8859-1', $raw);
+}
 
 # ============================================================
 # PHASE 1: RAW BYTES / ENCODING NORMALISATION
 # ============================================================
+
+# Strip UTF-8 BOM (U+FEFF) — shows as ï»¿ when misread, silently eat it
+$text =~ s/^\x{FEFF}//;
 
 # CRLF and stray CR -> LF  (must happen before any \n logic)
 $text =~ s/\r\n/\n/g;
@@ -84,6 +101,10 @@ $text =~ s/[\x{00A0}\x{2000}-\x{200B}\x{202F}\x{205F}\x{3000}]/ /g;
 $text =~ s/``/"/g;
 $text =~ s/''/"/g;
 
+# Curly/smart quotes -> straight ASCII (must be after decode so chars are proper Unicode)
+$text =~ s/[\x{2018}\x{2019}]/'/g;
+$text =~ s/[\x{201C}\x{201D}]/"/g;
+
 # ============================================================
 # PHASE 2: BOILERPLATE STRIPPING
 # ============================================================
@@ -101,8 +122,8 @@ $text =~ s/End of (the )?Project Gutenberg.*//si;
 $text =~ s/\[(Illustrations?|Illustration:[^\]]*|Footnote[^\]]*)\]//gi;
 
 # Asterism section separators — TTS reads these as "star star star"
-$text =~ s/^\s*\*\s*\*\s*\*\s*$/\n\n/mg;
-$text =~ s/^\s*\*{3,}\s*$/\n\n/mg;
+# Matches any number of stars separated by spaces: * * * or * * * * * etc.
+$text =~ s/^\s*\*(?:\s*\*)+\s*$/\n\n/mg;
 
 # Horizontal rules (--- or ___) used as section separators
 $text =~ s/^[\-_]{3,}$/\n\n/mg;
@@ -117,12 +138,21 @@ $text =~ s/^[\-_]{3,}$/\n\n/mg;
 # Must run BEFORE soft-wrap joining
 $text =~ s/([A-Za-z])-\s*\n\s*([A-Za-z])/$1$2/g;
 
-# Join soft-wrapped lines — only when the next line starts lowercase,
-# meaning it looks like sentence continuation rather than a new heading/line.
-# Two passes: first catches lines ending in mid-sentence punctuation,
-# second catches plain lowercase endings (e.g. "slowly\nthrough")
-$text =~ s/([a-z,;:])\n(?=[a-z])/$1 /g;
-$text =~ s/([a-z])\n(?=[a-z])/$1 /g;
+# Join soft-wrapped lines using terminal punctuation as the signal.
+# The right question is not "what does the next line start with?"
+# (which cannot distinguish mid-sentence proper nouns from new sentences)
+# but "what does the current line END with?"
+#
+# Rule: if a line does NOT end in terminal punctuation (.!?) it is a soft
+# wrap and must be joined regardless of the case of the next line.
+# The (?!\n) lookahead ensures paragraph breaks (double newlines) are
+# never touched so chapter/section boundaries remain intact.
+#
+# Handles all previously broken cases in one pass:
+#   "...some meat from\nKai."   -> "...some meat from Kai."
+#   "...said\nOwain,"           -> "...said Owain,"
+#   '...said he, "I\nwould'    -> '...said he, "I would'
+$text =~ s/([^.!?\n])\n(?!\n)/$1 /g;
 
 # ============================================================
 # PHASE 4: PUNCTUATION CLEANUP
@@ -136,9 +166,7 @@ $text =~ s/^\s*\x{2014}\s*/ /mg;
 # Mid-sentence em-dashes (word—word) -> comma-space (preserve the breath)
 $text =~ s/\s*\x{2014}\s*/, /g;
 
-# Smart quotes / remaining dashes -> ASCII
-$text =~ s/[\x{2018}\x{2019}]/'/g;
-$text =~ s/[\x{201C}\x{201D}]/"/g;
+# En dash -> hyphen
 $text =~ s/\x{2013}/-/g;
 
 # ASCII double-hyphen (spaced only, avoids compound words)
@@ -215,10 +243,15 @@ $text =~ s/,\s*(and|but|so|yet)\s*,/ $1 /gi;
 # Soften sentence-initial bardic openers
 $text =~ s/\.\s+(And|But|So|For|Yet|Nor|Then|Thereupon)\b/, \l$1/g;
 
-# Downcase ALL-CAPS multi-word headings (2–6 words) so Kokoro doesn't shout them.
-# Upper bound {1,5} prevents downcasing long proper-noun phrases like
-# "UNITED STATES ARMY" which are content, not headings.
-$text =~ s/^[A-Z0-9]+(?:\s+[A-Z0-9]+){1,5}$/\L$&/mg;
+# Convert ALL-CAPS multi-word headings to epub2tts-kokoro chapter markers.
+# Format: "# Title Case Heading" — the # prefix makes epub2tts-kokoro announce
+# the chapter name and use it for m4b chapter navigation instead of saying "blank".
+# Matches 2-9 words (upper bound allows long Mabinogion titles like
+# "KILHWCH AND OLWEN OR THE TWRCH TRWYTH" while still ignoring body text).
+# Single ALL-CAPS words (NASA, USSR) are left alone.
+$text =~ s/^([A-Z][A-Z0-9]*(?:\s+[A-Z][A-Z0-9]*){1,8})$/
+    '# ' . join(' ', map { ucfirst(lc($_)) } split(\/\s+\/, $1))
+/mge;
 
 # ============================================================
 # PHASE 7: ARTEFACT CLEANUP & RESTORATION
@@ -226,6 +259,27 @@ $text =~ s/^[A-Z0-9]+(?:\s+[A-Z0-9]+){1,5}$/\L$&/mg;
 
 $text =~ s/,(\s*,)+/,/g;    # collapse runs of commas
 $text =~ s/,\s*\././g;      # orphaned comma before period
+
+
+# ============================================================
+# PHASE 6b: SENTENCE SPLITTING FOR TTS CHUNKING
+# ============================================================
+# epub2tts-kokoro splits .txt on double newlines, so without this
+# every joined paragraph becomes one massive synthesis chunk,
+# causing 7x slowdowns vs epub source (huge STFT tensors).
+# Must run BEFORE sentinel restoration so abbreviation periods
+# (Mr. Dr. St.) are still hidden as sentinel tokens and immune
+# to the sentence-boundary split.
+#
+# Split after .!? followed by space + capital or opening quote.
+# Paragraph breaks (double newlines) are preserved.
+$text =~ s/([.!?])
+           \s+
+           (?=[A-Z"'\x{201C}])
+           /$1\n/gx;
+
+# Also split after closing quote-punctuation: ." !" ?"
+$text =~ s/([.!?]"[ ]*)(?=[A-Z"'\x{201C}])/$1\n/g;
 
 # Restore all protected tokens (initials and abbreviations)
 for my $pair (@abbrev_keys) {
@@ -239,8 +293,10 @@ for my $pair (@abbrev_keys) {
 # ============================================================
 
 $text =~ s/[ \t]{2,}/ /g;
+$text =~ s/[ \t]+$//mg;     # trailing spaces per line
 $text =~ s/\n{3,}/\n\n/g;
 $text =~ s/^\s+//;
+
 
 # ============================================================
 # OUTPUT
